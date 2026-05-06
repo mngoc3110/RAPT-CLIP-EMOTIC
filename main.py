@@ -83,6 +83,8 @@ optim_group.add_argument('--weight-decay', type=float, default=0.0005, help='Wei
 optim_group.add_argument('--momentum', type=float, default=0.9, help='Momentum for the SGD optimizer.')
 optim_group.add_argument('--milestones', nargs='+', type=int, default=[10, 15], help='Epochs at which to decay the learning rate.')
 optim_group.add_argument('--gamma', type=float, default=0.1, help='Factor for learning rate decay.')
+optim_group.add_argument('--scheduler', type=str, default='multistep', choices=['multistep', 'cosine'], help='LR scheduler type. cosine = CosineAnnealingLR with linear warmup.')
+optim_group.add_argument('--warmup-epochs', type=int, default=2, help='Number of linear warmup epochs for cosine scheduler.')
 
 # --- Loss & Imbalance Handling ---
 loss_group = parser.add_argument_group('Loss & Imbalance Handling', 'Parameters for loss functions and imbalance handling')
@@ -99,13 +101,23 @@ loss_group.add_argument('--use-ldl', action='store_true', help='Use Semantic Lab
 loss_group.add_argument('--ldl-temperature', type=float, default=1.0, help='Temperature for LDL target distribution.')
 loss_group.add_argument('--ldl-warmup', type=int, default=5, help='Warmup epochs for LDL loss (during warmup, use CE).')
 loss_group.add_argument('--mixup-alpha', type=float, default=0.2, help='Alpha value for Mixup data augmentation. Set to 0.0 to disable.')
-# NEW LDAM ARGS
+# LDAM ARGS
 loss_group.add_argument('--ldam-max-m', type=float, default=0.5, help='Max margin for LDAM Loss.')
 loss_group.add_argument('--ldam-s', type=float, default=30.0, help='Scaling factor for LDAM Loss.')
+# ASL ARGS
+loss_group.add_argument('--use-asl', action='store_true', help='Use Asymmetric Loss (ASL) for EMOTIC multi-label. SOTA for imbalanced multi-label.')
+loss_group.add_argument('--asl-gamma-neg', type=float, default=4.0, help='ASL: focusing param for negatives.')
+loss_group.add_argument('--asl-gamma-pos', type=float, default=0.0, help='ASL: focusing param for positives.')
+loss_group.add_argument('--asl-clip', type=float, default=0.05, help='ASL: probability shift for negatives.')
+# EMA ARGS
+loss_group.add_argument('--use-ema', action='store_true', help='Use Exponential Moving Average of model weights for evaluation.')
+loss_group.add_argument('--ema-decay', type=float, default=0.999, help='EMA decay factor.')
+# TTA ARGS
+loss_group.add_argument('--use-tta', action='store_true', help='Use Test-Time Augmentation (original + hflip) during validation.')
 
 # --- Model & Input ---
 model_group = parser.add_argument_group('Model & Input', 'Parameters for model architecture and data handling')
-model_group.add_argument('--text-type', default='prompt_ensemble', choices=['class_names', 'class_names_with_context', 'class_descriptor', 'prompt_ensemble'], help='Type of text prompts to use.')
+model_group.add_argument('--text-type', default='prompt_ensemble', choices=['class_names', 'class_names_with_context', 'class_descriptor', 'class_descriptor_paper', 'prompt_ensemble', 'prompt_ensemble_paper', 'prompt_ensemble_combined'], help='Type of text prompts to use.')
 model_group.add_argument('--temporal-layers', type=int, default=1, help='Number of layers in the temporal modeling part.')
 model_group.add_argument('--contexts-number', type=int, default=8, help='Number of context vectors in the prompt learner.')
 model_group.add_argument('--class-token-position', type=str, default="end", help='Position of the class token in the prompt.')
@@ -120,6 +132,9 @@ model_group.add_argument('--use-moco', action='store_true', help='Use MoCoRank f
 model_group.add_argument('--moco-k', type=int, default=4096, help='Queue size for MoCo.')
 model_group.add_argument('--moco-m', type=float, default=0.99, help='Momentum for MoCo.')
 model_group.add_argument('--moco-t', type=float, default=0.07, help='Temperature for MoCo.')
+model_group.add_argument('--streams', type=str, default='face,body,context',
+                         help='Comma-separated list of active visual streams. Options: face,body,context. '
+                              'E.g., "body,context" for 2-stream ablation without face.')
 
 # ==================== Helper Functions ====================
 def setup_environment(args: argparse.Namespace) -> argparse.Namespace:
@@ -214,23 +229,36 @@ def run_training(args: argparse.Namespace) -> None:
             if 0 <= label_idx < len(cls_num_list):
                 cls_num_list[label_idx] += 1
     elif hasattr(train_loader.dataset, 'samples'):
-        print(f"=> Calculating class distribution from samples (CAER-S)...")
+        print(f"=> Calculating class distribution from samples (CAER-S / EMOTIC)...")
         # CAERSDataset stores (path, label, rel_path) in samples
-        for _, label, _ in train_loader.dataset.samples:
-            # CAERSDataset.__getitem__ returns label (if 0-based) or label-1 (if 1-based).
-            # We updated CAERSDataset to assume 0-based file labels, so __getitem__ returns label directly.
-            # Thus, we should use 'label' directly here as well, assuming it matches what __getitem__ returns.
-            # But wait, __getitem__ returns 'label_idx'.
-            # If the file has 0-based labels, 'label' in samples is 0-based.
-            label_idx = int(label)
-            if 0 <= label_idx < len(cls_num_list):
-                cls_num_list[label_idx] += 1
+        # EmoticDataset stores {'path': ..., 'label': ..., ...} in samples
+        
+        labels = []
+        if len(train_loader.dataset.samples) > 0:
+            sample_0 = train_loader.dataset.samples[0]
+            if isinstance(sample_0, dict):
+                # Emotic format
+                labels = [s['label'] for s in train_loader.dataset.samples]
+            elif isinstance(sample_0, tuple) or isinstance(sample_0, list):
+                # CAER-S format or generic
+                if len(sample_0) >= 2:
+                     labels = [s[1] for s in train_loader.dataset.samples]
+
+        for label in labels:
+            if isinstance(label, list):
+                # Multi-label case (e.g. EMOTIC with 26 classes)
+                for i, val in enumerate(label):
+                    if val == 1 and 0 <= i < len(cls_num_list):
+                        cls_num_list[i] += 1
             else:
-                # Fallback if label is 1-based in file but mapped to 0-based in getitem
-                # This branch handles the case where label might be 1..7
-                label_idx_alt = label_idx - 1
-                if 0 <= label_idx_alt < len(cls_num_list):
-                    cls_num_list[label_idx_alt] += 1
+                # Single-label case
+                label_idx = int(label)
+                if 0 <= label_idx < len(cls_num_list):
+                    cls_num_list[label_idx] += 1
+                else:
+                    label_idx_alt = label_idx - 1
+                    if 0 <= label_idx_alt < len(cls_num_list):
+                        cls_num_list[label_idx_alt] += 1
     else:
         # Fallback or warning if dataset structure is different
         print("=> Warning: Could not calculate class distribution directly from dataset. Using uniform distribution placeholder if needed.")
@@ -241,13 +269,46 @@ def run_training(args: argparse.Namespace) -> None:
     print(f"=> Class distribution (Training): {cls_num_list}")
 
     # Loss and optimizer
-    if args.use_ldl:
+    if args.dataset.strip() == "EMOTIC":
+        # EMOTIC: 26-class multi-label classification
+        if args.use_asl:
+            # --- Asymmetric Loss (SOTA for imbalanced multi-label) ---
+            print(f"=> Using Asymmetric Loss (ASL) for Multi-Label EMOTIC.")
+            print(f"   gamma_neg={args.asl_gamma_neg}, gamma_pos={args.asl_gamma_pos}, clip={args.asl_clip}")
+            criterion = AsymmetricLoss(
+                gamma_neg=args.asl_gamma_neg,
+                gamma_pos=args.asl_gamma_pos,
+                clip=args.asl_clip
+            ).to(args.device)
+        else:
+            # --- BCEWithLogitsLoss with pos_weight (fallback) ---
+            print(f"=> Using BCEWithLogitsLoss for Multi-Label EMOTIC.")
+            if sum(cls_num_list) > 0:
+                total_samples = len(train_loader.dataset)
+                cls_num_tensor = torch.tensor(cls_num_list).float()
+                cls_num_tensor = torch.where(cls_num_tensor == 0, torch.ones_like(cls_num_tensor), cls_num_tensor)
+                negative_samples = total_samples - cls_num_tensor
+                pos_weight = (negative_samples / cls_num_tensor).to(args.device)
+                print(f"   BCE pos_weight calculated.")
+                criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(args.device)
+            else:
+                criterion = nn.BCEWithLogitsLoss().to(args.device)
+            
+    elif args.use_ldl:
         print(f"=> Using SemanticLDLLoss (LDL) with temperature {args.ldl_temperature}")
         criterion = SemanticLDLLoss(temperature=args.ldl_temperature).to(args.device)
     elif args.loss_type == 'ldam':
         if sum(cls_num_list) > 0:
             print(f"=> Using LDAM Loss with s={args.ldam_s}, max_m={args.ldam_max_m}")
-            criterion = LDAMLoss(cls_num_list=cls_num_list, max_m=args.ldam_max_m, s=args.ldam_s).to(args.device)
+            # Calculate per-class weights for LDAM
+            cls_num_tensor = torch.tensor(cls_num_list).float()
+            # Avoid division by zero
+            cls_num_tensor = torch.where(cls_num_tensor == 0, torch.ones_like(cls_num_tensor), cls_num_tensor)
+            weights = 1.0 / cls_num_tensor
+            weights = weights / weights.sum() * len(class_names)
+            weights = weights.to(args.device)
+            print(f"   LDAM Weights: {weights.tolist()}")
+            criterion = LDAMLoss(cls_num_list=cls_num_list, max_m=args.ldam_max_m, s=args.ldam_s, weight=weights).to(args.device)
         else:
             print("=> Error: cls_num_list is empty/zero. Cannot use LDAM. Falling back to CrossEntropy.")
             criterion = nn.CrossEntropyLoss().to(args.device)
@@ -262,13 +323,19 @@ def run_training(args: argparse.Namespace) -> None:
     recorder = RecorderMeter(args.epochs)
     
     optimizer_grouped_parameters = [
-        {"params": model.temporal_net.parameters(), "lr": args.lr},
-        {"params": model.temporal_net_body.parameters(), "lr": args.lr},
         {"params": model.image_encoder.parameters(), "lr": args.lr_image_encoder},
         {"params": model.prompt_learner.parameters(), "lr": args.lr_prompt_learner},
         {"params": model.project_fc.parameters(), "lr": args.lr},
-        {"params": model.face_adapter.parameters(), "lr": args.lr_adapter}
     ]
+    # Add stream-specific params dynamically
+    active_streams = [s.strip() for s in args.streams.split(',')]
+    if 'face' in active_streams:
+        optimizer_grouped_parameters.append({"params": model.temporal_net.parameters(), "lr": args.lr})
+        optimizer_grouped_parameters.append({"params": model.face_adapter.parameters(), "lr": args.lr_adapter})
+    if 'body' in active_streams:
+        optimizer_grouped_parameters.append({"params": model.temporal_net_body.parameters(), "lr": args.lr})
+    if 'context' in active_streams:
+        optimizer_grouped_parameters.append({"params": model.temporal_net_context.parameters(), "lr": args.lr})
 
     if args.optimizer == 'SGD':
         optimizer = torch.optim.SGD(optimizer_grouped_parameters, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -277,7 +344,26 @@ def run_training(args: argparse.Namespace) -> None:
     else:
         raise ValueError(f"Optimizer {args.optimizer} not supported.")
 
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
+    if args.scheduler == 'cosine':
+        from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+        warmup_sched = LinearLR(
+            optimizer, start_factor=0.1, end_factor=1.0,
+            total_iters=args.warmup_epochs
+        )
+        cosine_sched = CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, args.epochs - args.warmup_epochs),
+            eta_min=1e-7
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_sched, cosine_sched],
+            milestones=[args.warmup_epochs]
+        )
+        print(f"=> Using CosineAnnealingLR with {args.warmup_epochs} warmup epochs.")
+    else:
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
+        print(f"=> Using MultiStepLR with milestones={args.milestones}, gamma={args.gamma}.")
     
     # Resume from checkpoint
     if args.resume:
@@ -309,7 +395,9 @@ def run_training(args: argparse.Namespace) -> None:
                     mi_warmup=args.mi_warmup, mi_ramp=args.mi_ramp,
                     dc_warmup=args.dc_warmup, dc_ramp=args.dc_ramp, 
                     use_amp=args.use_amp, grad_clip=args.grad_clip, mixup_alpha=args.mixup_alpha,
-                    use_ldl=args.use_ldl, ldl_warmup=args.ldl_warmup)
+                    use_ldl=args.use_ldl, ldl_warmup=args.ldl_warmup,
+                    use_ema=args.use_ema, ema_decay=args.ema_decay,
+                    use_tta=args.use_tta, class_names=class_names)
     
     for epoch in range(start_epoch, args.epochs):
         inf = f'******************** Epoch: {epoch} ********************'
@@ -351,34 +439,59 @@ def run_training(args: argparse.Namespace) -> None:
         recorder.update(epoch, train_los, train_war, train_uar, val_los, val_war, val_uar)
         recorder.plot_curve(log_curve_path)
         
-        log_msg = (
-                   f'\n'
-                   f'--- Epoch {epoch} Summary ---\n'
-                   f'Train WAR: {train_war:.2f}% | Train UAR: {train_uar:.2f}%\n'
-                   f'Valid WAR: {val_war:.2f}% | Valid UAR: {val_uar:.2f}%\n'
-                   f'Best Valid UAR so far: {best_val_uar:.2f}%\n'
-                   f'Time: {epoch_time:.2f}s\n'
-                   f'Train Confusion Matrix:\n{train_cm}\n'
-                   f'Validation Confusion Matrix:\n{val_cm}\n'
-                   f'--- End of Epoch {epoch} ---\n'
-                   )
+        if trainer.is_multilabel:
+            # We are using mAP
+            log_msg = (
+                       f'\n'
+                       f'--- Epoch {epoch} Summary ---\n'
+                       f'Train mAP: {train_war:.2f}%\n'
+                       f'Valid mAP: {val_war:.2f}%\n'
+                       f'Best Valid mAP so far: {best_val_war:.2f}%\n'
+                       f'Time: {epoch_time:.2f}s\n'
+                       f'--- End of Epoch {epoch} ---\n'
+                       )
+        else:
+            log_msg = (
+                       f'\n'
+                       f'--- Epoch {epoch} Summary ---\n'
+                       f'Train WAR: {train_war:.2f}% | Train UAR: {train_uar:.2f}%\n'
+                       f'Valid WAR: {val_war:.2f}% | Valid UAR: {val_uar:.2f}%\n'
+                       f'Best Valid UAR so far: {best_val_uar:.2f}%\n'
+                       f'Time: {epoch_time:.2f}s\n'
+                       f'Train Confusion Matrix:\n{train_cm}\n'
+                       f'Validation Confusion Matrix:\n{val_cm}\n'
+                       f'--- End of Epoch {epoch} ---\n'
+                       )
         print(log_msg)
         with open(log_txt_path, 'a') as f:
             f.write(log_msg + '\n\n')
 
     # Final evaluation with best model
     print("=> Final evaluation on test set...")
-    pre_trained_dict = torch.load(best_checkpoint_path, map_location=f"cuda:{args.gpu}", weights_only=False)['state_dict']
+    pre_trained_dict = torch.load(best_checkpoint_path, map_location=args.device, weights_only=False)['state_dict']
     model.load_state_dict(pre_trained_dict)
-    computer_uar_war(
-        val_loader=test_loader,
-        model=model,
-        device=args.device,
-        class_names=class_names,
-        log_confusion_matrix_path=log_confusion_matrix_path,
-        log_txt_path=log_txt_path,
-        title=f"Confusion Matrix on {args.dataset} Test Set"
-    )
+    
+    if trainer.is_multilabel:
+        # For multi-label (EMOTIC), use TTA-based mAP evaluation
+        print("=> Running final multi-label mAP evaluation...")
+        final_mAP = trainer.validate_tta(test_loader, "Final-TTA")
+        print(f"\n{'='*50}")
+        print(f"FINAL TEST mAP (with TTA): {final_mAP:.2f}%")
+        print(f"{'='*50}\n")
+        with open(log_txt_path, 'a') as f:
+            f.write(f'\n{"="*50}\n')
+            f.write(f'FINAL TEST mAP (with TTA): {final_mAP:.2f}%\n')
+            f.write(f'{"="*50}\n')
+    else:
+        computer_uar_war(
+            val_loader=test_loader,
+            model=model,
+            device=args.device,
+            class_names=class_names,
+            log_confusion_matrix_path=log_confusion_matrix_path,
+            log_txt_path=log_txt_path,
+            title=f"Confusion Matrix on {args.dataset} Test Set"
+        )
 
 def run_eval(args: argparse.Namespace) -> None:
     print("=> Starting evaluation mode...")

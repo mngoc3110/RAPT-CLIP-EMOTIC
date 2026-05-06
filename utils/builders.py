@@ -8,6 +8,7 @@ import torch.utils.data
 from clip import clip
 
 from dataloader.caer_s_dataloader import CAERSDataset, caers_train_data_loader, caers_val_data_loader, caers_test_data_loader
+from dataloader.emotic_dataloader import EmoticDataset, emotic_train_data_loader, emotic_val_data_loader, emotic_test_data_loader
 from models.Generate_Model import GenerateModel
 from models.Text import *
 from utils.utils import *
@@ -16,6 +17,7 @@ from utils.utils import *
 def build_model(args: argparse.Namespace, input_text: list) -> torch.nn.Module:
     print("Loading pretrained CLIP model...")
     CLIP_model, _ = clip.load(args.clip_path, device='cpu')
+    CLIP_model = CLIP_model.float() # Ensure float32 for MPS
 
     print("\nInput Text Prompts:")
     # Handle the case where input_text is a list of lists for prompt ensembling
@@ -40,7 +42,15 @@ def build_model(args: argparse.Namespace, input_text: list) -> torch.nn.Module:
             if "image_encoder" in name:
                 param.requires_grad = True
 
-    trainable_params_keywords = ["temporal_net", "prompt_learner", "temporal_net_body", "project_fc", "face_adapter"]
+    # Build trainable keywords based on active streams
+    active_streams = [s.strip() for s in getattr(args, 'streams', 'face,body,context').split(',')]
+    trainable_params_keywords = ["prompt_learner", "project_fc"]
+    if 'face' in active_streams:
+        trainable_params_keywords.extend(["temporal_net", "face_adapter"])
+    if 'body' in active_streams:
+        trainable_params_keywords.append("temporal_net_body")
+    if 'context' in active_streams:
+        trainable_params_keywords.append("temporal_net_context")
     
     print('\nTrainable parameters:')
     for name, param in model.named_parameters():
@@ -64,8 +74,17 @@ def get_class_info(args: argparse.Namespace) -> Tuple[list, list]:
         class_names_with_context = class_names_with_context_caer
         class_descriptor = class_descriptor_caer
         ensemble_prompts = prompt_ensemble_caer
+    elif dataset_name == "EMOTIC":
+        class_names = class_names_emotic
+        class_names_with_context = class_names_with_context_emotic
+        class_descriptor = class_descriptor_emotic
+        ensemble_prompts = prompt_ensemble_emotic
+        # Paper-based variants
+        class_descriptor_paper = class_descriptor_emotic_paper
+        ensemble_prompts_paper = prompt_ensemble_emotic_paper
+        ensemble_prompts_combined = prompt_ensemble_emotic_combined
     else:
-        raise NotImplementedError(f"Dataset '{dataset_name}' is not implemented. Only CAER-S is supported in this version.")
+        raise NotImplementedError(f"Dataset '{dataset_name}' is not implemented. Only CAER-S and EMOTIC are supported in this version.")
 
     if args.text_type == "class_names":
         input_text = class_names
@@ -73,8 +92,14 @@ def get_class_info(args: argparse.Namespace) -> Tuple[list, list]:
         input_text = class_names_with_context
     elif args.text_type == "class_descriptor":
         input_text = class_descriptor
+    elif args.text_type == "class_descriptor_paper":
+        input_text = class_descriptor_paper
     elif args.text_type == "prompt_ensemble":
         input_text = ensemble_prompts
+    elif args.text_type == "prompt_ensemble_paper":
+        input_text = ensemble_prompts_paper
+    elif args.text_type == "prompt_ensemble_combined":
+        input_text = ensemble_prompts_combined
     else:
         raise ValueError(f"Unknown text_type: {args.text_type}")
 
@@ -153,5 +178,53 @@ def build_dataloaders(args: argparse.Namespace) -> Tuple[torch.utils.data.DataLo
         print(f"Total number of training images: {len(train_data)}")
         return train_loader, val_loader, test_loader
 
+    elif args.dataset.strip() == "EMOTIC":
+        print(f"=> Using EMOTIC 3-Stream (Face, Body, Context) dataloader...")
+        
+        train_data = EmoticDataset(
+            root_dir=args.root_dir,
+            list_file=train_annotation_file_path,
+            mode='train',
+            image_size=args.image_size,
+            num_classes=num_classes,
+            bounding_box_face=args.bounding_box_face,
+            bounding_box_body=args.bounding_box_body
+        )
+
+        # For multi-label, we don't usually use WeightedRandomSampler
+        # Instead we use Loss weighting.
+        
+        train_loader = torch.utils.data.DataLoader(
+            train_data, 
+            batch_size=args.batch_size, 
+            shuffle=True, 
+            num_workers=args.workers, 
+            pin_memory=False, 
+            drop_last=True
+        )
+        
+        val_loader = emotic_val_data_loader(
+            root_dir=args.root_dir,
+            list_file=val_annotation_file_path,
+            image_size=args.image_size,
+            batch_size=args.batch_size,
+            num_workers=args.workers,
+            bounding_box_face=args.bounding_box_face,
+            bounding_box_body=args.bounding_box_body
+        )
+        
+        test_loader = emotic_test_data_loader(
+            root_dir=args.root_dir,
+            list_file=test_annotation_file_path,
+            image_size=args.image_size,
+            batch_size=args.batch_size,
+            num_workers=args.workers,
+            bounding_box_face=args.bounding_box_face,
+            bounding_box_body=args.bounding_box_body
+        )
+        
+        print(f"Total number of training images: {len(train_loader.dataset)}")
+        return train_loader, val_loader, test_loader
+
     else:
-        raise NotImplementedError(f"Dataset {args.dataset} is not supported. Please use CAER-S.")
+        raise NotImplementedError(f"Dataset {args.dataset} is not supported. Please use CAER-S or EMOTIC.")
