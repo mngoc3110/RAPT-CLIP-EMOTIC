@@ -13,5 +13,4 @@ class Adapter(nn.Module):
         )
 
     def forward(self, x):
-        x = self.fc(x)
-        return x
+        return x + self.fc(x)

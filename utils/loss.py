@@ -151,6 +151,68 @@ class LDAMLoss(nn.Module):
         output = torch.where(index, x_m, x)
         return F.cross_entropy(self.s * output, target, weight=self.weight)
 
+class AsymmetricLoss(nn.Module):
+    """Asymmetric Loss for Multi-Label Classification (ASL).
+    Paper: 'Asymmetric Loss For Multi-Label Classification' (ICCV 2021).
+    
+    Key idea: treat positive and negative labels differently.
+    - Negative samples: down-weighted by focal factor + probability shift (clip)
+    - Positive samples: standard focal loss with gamma_pos (usually 0)
+    
+    This is especially effective for EMOTIC's severely imbalanced 26-class multi-label task.
+    
+    Args:
+        gamma_neg (float): Focusing param for negative samples. Default: 4.
+        gamma_pos (float): Focusing param for positive samples. Default: 0.
+        clip (float): Probability margin for negative shifting. Default: 0.05.
+        eps (float): Small value to avoid log(0). Default: 1e-8.
+        disable_torch_grad_focal_loss (bool): For memory efficiency. Default: True.
+    """
+    def __init__(self, gamma_neg=4, gamma_pos=0, clip=0.05, eps=1e-8,
+                 disable_torch_grad_focal_loss=True):
+        super().__init__()
+        self.gamma_neg = gamma_neg
+        self.gamma_pos = gamma_pos
+        self.clip = clip
+        self.eps = eps
+        self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
+
+    def forward(self, x, y):
+        """Forward pass.
+        Args:
+            x: Logits tensor of shape (B, num_classes)
+            y: Multi-hot targets tensor of shape (B, num_classes), float
+        """
+        # Compute probabilities from logits
+        x_sigmoid = torch.sigmoid(x)
+        xs_pos = x_sigmoid
+        xs_neg = 1 - x_sigmoid
+
+        # Asymmetric Clip: shift negative probabilities by margin to discard easy negatives
+        if self.clip is not None and self.clip > 0:
+            xs_neg = (xs_neg + self.clip).clamp(max=1)
+
+        # Basic binary cross-entropy
+        los_pos = y * torch.log(xs_pos.clamp(min=self.eps))
+        los_neg = (1 - y) * torch.log(xs_neg.clamp(min=self.eps))
+        loss = los_pos + los_neg
+
+        # Asymmetric Focusing: down-weight easy samples via focal modulation
+        if self.gamma_neg > 0 or self.gamma_pos > 0:
+            if self.disable_torch_grad_focal_loss:
+                torch.set_grad_enabled(False)
+            pt0 = xs_neg * (1 - y)   # prob that negative was correctly predicted as neg
+            pt1 = xs_pos * y          # prob that positive was correctly predicted as pos
+            pt = pt0 + pt1
+            one_sided_gamma = self.gamma_pos * y + self.gamma_neg * (1 - y)
+            one_sided_w = torch.pow(1 - pt, one_sided_gamma)
+            if self.disable_torch_grad_focal_loss:
+                torch.set_grad_enabled(True)
+            loss *= one_sided_w
+
+        return -loss.mean()
+
+
 class SemanticLDLLoss(nn.Module):
     def __init__(self, temperature=1.0, target_temperature=0.1):
         super(SemanticLDLLoss, self).__init__()

@@ -14,15 +14,22 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding.type(self.dtype)
+        # Force computation to be in float32 on MPS to avoid NaN issues
+        # that occur with float16 on MPS in certain layer norm / attention ops.
+        compute_dtype = self.dtype
+        if prompts.device.type == 'mps':
+             compute_dtype = torch.float32
+             prompts = prompts.to(compute_dtype)
+
+        x = prompts + self.positional_embedding.type(compute_dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
+        x = self.transformer(x.type(compute_dtype))
         x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
+        x = self.ln_final(x).type(compute_dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection.type(compute_dtype)
         return x
 
 class PromptLearner(nn.Module):

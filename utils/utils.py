@@ -180,13 +180,14 @@ def computer_uar_war(val_loader, model, device, class_names, log_confusion_matri
     all_targets = []
     
     with torch.no_grad():
-        for i, (images_face, images_body, target) in enumerate(tqdm.tqdm(val_loader, desc="Calculating Metrics")):
+        for i, (images_face, images_body, images_context, target) in enumerate(tqdm.tqdm(val_loader, desc="Calculating Metrics")):
             images_face = images_face.to(device)
             images_body = images_body.to(device)
+            images_context = images_context.to(device)
             target = target.to(device)
 
-            # Model now returns 4 values: output, text_features, hand_crafted_text_features, moco_logits
-            output, _, _, _ = model(images_face, images_body)
+            # Model returns 4 values: output, text_features, hand_crafted_text_features, moco_logits
+            output, _, _, _ = model(images_face, images_body, images_context)
             predicted = output.argmax(dim=1)
             
             all_predicted.append(predicted.cpu())

@@ -4,11 +4,6 @@ from torch import nn, einsum
 import math
 
 
-class GELU(nn.Module):
-    def forward(self, x):
-        return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
-
-
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -32,7 +27,7 @@ class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.):
         super().__init__()
         self.net = nn.Sequential(nn.Linear(dim, hidden_dim),
-                                 GELU(),
+                                 nn.GELU(),
                                  nn.Dropout(dropout),
                                  nn.Linear(hidden_dim, dim),
                                  nn.Dropout(dropout))
@@ -91,7 +86,8 @@ class Temporal_Transformer_Mean(nn.Module):
         dropout=0.1
         self.num_patches = num_patches
         self.input_dim = input_dim
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, input_dim))
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_patches, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
         self.temporal_transformer = Transformer(input_dim, depth, heads, dim_head, mlp_dim, dropout)
 
     def forward(self, x):
@@ -111,9 +107,12 @@ class Temporal_Transformer_Cls_v6(nn.Module):
         dropout=0.1
         self.num_patches = num_patches
         self.input_dim = input_dim
-        self.cls_token_face = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.cls_token_body = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches+1, input_dim))
+        self.cls_token_face = nn.Parameter(torch.empty(1, 1, input_dim))
+        self.cls_token_body = nn.Parameter(torch.empty(1, 1, input_dim))
+        nn.init.trunc_normal_(self.cls_token_face, std=0.02)
+        nn.init.trunc_normal_(self.cls_token_body, std=0.02)
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_patches+1, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
         self.temporal_transformer = Transformer(input_dim, depth, heads, dim_head, mlp_dim, dropout)
 
     def forward(self,x,tag):  #8,16,512
@@ -135,9 +134,12 @@ class Temporal_Transformer_Cls_v7(nn.Module):
         dropout=0.1
         self.num_patches = num_patches
         self.input_dim = input_dim
-        self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches//2+1, input_dim))
-        self.pos_embedding_diff = nn.Parameter(torch.randn(1, 2, input_dim))
+        self.cls_token = nn.Parameter(torch.empty(1, 1, input_dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_patches//2+1, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
+        self.pos_embedding_diff = nn.Parameter(torch.empty(1, 2, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding_diff, std=0.02)
         self.temporal_transformer = Transformer(input_dim, depth, heads, dim_head, mlp_dim, dropout)
 
     def forward(self, x):  #8,16,512
@@ -160,8 +162,10 @@ class Temporal_Transformer_Cls(nn.Module):
         dropout=0.1
         self.num_patches = num_patches
         self.input_dim = input_dim
-        self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches+1, input_dim))
+        self.cls_token = nn.Parameter(torch.empty(1, 1, input_dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_patches+1, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
         self.temporal_transformer = Transformer(input_dim, depth, heads, dim_head, mlp_dim, dropout)
 
     def forward(self, x):  #8,16,512
@@ -183,7 +187,8 @@ class Temporal_Transformer_AttnPool(nn.Module):
         self.input_dim = input_dim
         
         # We don't use [CLS] token here, instead we use all frame tokens
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, input_dim))
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_patches, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
         self.temporal_transformer = Transformer(input_dim, depth, heads, dim_head, mlp_dim, dropout)
         
         # Attention Pooling layers
@@ -221,7 +226,7 @@ class Temporal_Transformer_AttnPool(nn.Module):
         
         return pooled_x
     
-#### 混合人脸特征和上下文特征的关系
+#### 混合人臉特征和上下文特征的关系
 class Temporal_Transformer_Mix(nn.Module):
     def __init__(self, num_patches, input_dim, depth, heads, mlp_dim, dim_head):
         super().__init__()
@@ -229,7 +234,8 @@ class Temporal_Transformer_Mix(nn.Module):
         self.num_patches = num_patches
         self.input_dim = input_dim
         # self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, input_dim))
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_patches, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
         self.temporal_transformer = Transformer(input_dim, depth, heads, dim_head, mlp_dim, dropout)
 
     def forward(self, x):
@@ -252,7 +258,8 @@ class Temporal_Transformer_All(nn.Module):
         dropout=0.1
         self.num_patches = num_patches
         self.input_dim = input_dim
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, input_dim))
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_patches, input_dim))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
         self.temporal_transformer = Transformer(input_dim, depth, heads, dim_head, mlp_dim, dropout)
 
     def forward(self, x):
