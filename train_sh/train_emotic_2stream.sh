@@ -1,27 +1,14 @@
 #!/bin/bash
-# EMOTIC TRAINING — 3-Stream Architecture (Face, Body, Context)
-# Target: 40%+ mAP
-#
-# Architecture: 3-Stream RAPT-CLIP
-#   Stream 1: Face   (face_bboxes crop → CLIP → face_adapter → temporal_net)
-#   Stream 2: Body   (body_bboxes crop → CLIP → temporal_net_body)
-#   Stream 3: Context (full image → CLIP → temporal_net_context)
-#   Fusion: concat(512*3=1536) → project_fc → 512D → cosine sim with text
-#
-# Key features:
-#   1. train_bbox.txt (16k full samples, correct multi-label format)
-#   2. --use-asl      (Asymmetric Loss — SOTA for imbalanced multi-label)
-#   3. --scheduler cosine + --warmup-epochs 5 (smoother LR decay)
-#   4. 3-stream augmentation (face=light, body=moderate, context=strong)
-#   5. contexts-number 16, temperature 0.05, epochs 50
-#   6. 5 prompts/class (in Text.py)
+# EMOTIC TRAINING — 2-Stream Architecture (Face, Body)
+# Target: Ablation Study (RAPT-CLIP v1 Baseline)
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python main.py \
   --mode train \
-  --exper-name EMOTIC-3Stream-ASL \
+  --exper-name EMOTIC-2Stream-Ablation \
   --dataset EMOTIC \
+  --streams face,body \
   --gpu 0 \
   --workers 0 \
   --use-amp \

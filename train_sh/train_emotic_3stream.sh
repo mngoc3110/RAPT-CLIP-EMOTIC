@@ -1,24 +1,26 @@
 #!/bin/bash
-# EMOTIC — 3-Stream (Face + Body + Context) with Combined Prompts
+# EMOTIC TRAINING — 3-Stream Architecture (Face, Body, Context)
+# Target: 40%+ mAP
 #
 # Architecture: 3-Stream RAPT-CLIP
-#   Stream 1: Face    (face_bboxes crop → CLIP → face_adapter → temporal_net)  → 512D
-#   Stream 2: Body    (body_bboxes crop → CLIP → temporal_net_body)            → 512D
-#   Stream 3: Context (full image → CLIP → temporal_net_context)               → 512D
+#   Stream 1: Face   (face_bboxes crop → CLIP → face_adapter → temporal_net)
+#   Stream 2: Body   (body_bboxes crop → CLIP → temporal_net_body)
+#   Stream 3: Context (full image → CLIP → temporal_net_context)
 #   Fusion: concat(512*3=1536) → project_fc → 512D → cosine sim with text
 #
-# Prompts: prompt_ensemble_combined (7 prompts/class)
-#   = 1x Paper definition (Kosti et al., TPAMI 2019)
-#   + 1x Creative descriptor
-#   + 5x Body+context focused
-#
-# Usage: bash train_sh/train_emotic_3stream.sh
+# Key features:
+#   1. train_bbox.txt (16k full samples, correct multi-label format)
+#   2. --use-asl      (Asymmetric Loss — SOTA for imbalanced multi-label)
+#   3. --scheduler cosine + --warmup-epochs 5 (smoother LR decay)
+#   4. 3-stream augmentation (face=light, body=moderate, context=strong)
+#   5. contexts-number 16, temperature 0.05, epochs 50
+#   6. 5 prompts/class (in Text.py)
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python main.py \
   --mode train \
-  --exper-name EMOTIC-3Stream-Combined \
+  --exper-name EMOTIC-3Stream-ASL \
   --dataset EMOTIC \
   --gpu 0 \
   --workers 0 \
@@ -46,12 +48,11 @@ python main.py \
   --clip-path ViT-B/16 \
   --bounding-box-face emotic_dataset/emotic_face_bboxes_mtcnn.json \
   --bounding-box-body emotic_dataset/emotic_body_bboxes.json \
-  --text-type prompt_ensemble_combined \
+  --text-type prompt_ensemble \
   --contexts-number 16 \
   --class-token-position end \
   --class-specific-contexts True \
   --load_and_tune_prompt_learner True \
-  --streams face,body,context \
   --use-asl \
   --asl-gamma-neg 2.0 \
   --asl-gamma-pos 0.0 \
