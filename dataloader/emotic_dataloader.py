@@ -171,17 +171,26 @@ class EmoticDataset(data.Dataset):
             return img
 
     def _get_body_bbox(self, rel_path, bbox_txt):
-        """Get body bounding box from JSON or inline annotation."""
-        if rel_path in self.body_bboxes:
-            return self.body_bboxes[rel_path]
-        elif bbox_txt is not None:
+        """Get body bounding box from inline annotation or JSON."""
+        if bbox_txt is not None:
             return bbox_txt
+        elif rel_path in self.body_bboxes:
+            return self.body_bboxes[rel_path]
         return None
 
-    def _get_face_bbox(self, rel_path):
-        """Get face bounding box from JSON."""
+    def _get_face_bbox(self, rel_path, body_bbox=None):
+        """Get face bounding box from JSON with spatial validation."""
         if rel_path in self.face_bboxes:
-            return self.face_bboxes[rel_path]
+            face_bbox = self.face_bboxes[rel_path]
+            # Spatial validation: Face center must be inside body bbox
+            if body_bbox is not None and face_bbox is not None:
+                fx1, fy1, fx2, fy2 = face_bbox
+                bx1, by1, bx2, by2 = body_bbox
+                fc_x = (fx1 + fx2) / 2
+                fc_y = (fy1 + fy2) / 2
+                if not (bx1 <= fc_x <= bx2 and by1 <= fc_y <= by2):
+                    return None # Face belongs to someone else
+            return face_bbox
         return None
 
     def __getitem__(self, index):
@@ -209,7 +218,7 @@ class EmoticDataset(data.Dataset):
             img_body = img
 
         # ==================== Face Stream (Face BBox crop) ====================
-        face_bbox = self._get_face_bbox(rel_path)
+        face_bbox = self._get_face_bbox(rel_path, body_bbox)
         if face_bbox is not None:
             img_face = self._crop_with_bbox(img, face_bbox, margin_scale=0.2)
         else:
