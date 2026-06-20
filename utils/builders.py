@@ -44,7 +44,7 @@ def build_model(args: argparse.Namespace, input_text: list) -> torch.nn.Module:
 
     # Build trainable keywords based on active streams
     active_streams = [s.strip() for s in getattr(args, 'streams', 'face,body,context').split(',')]
-    trainable_params_keywords = ["prompt_learner", "project_fc"]
+    trainable_params_keywords = ["prompt_learner", "project_fc", "cmaf"]
     if 'face' in active_streams:
         trainable_params_keywords.extend(["temporal_net", "face_adapter"])
     if 'body' in active_streams:

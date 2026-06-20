@@ -3,6 +3,7 @@ from models.Temporal_Model import *
 from models.Prompt_Learner import *
 from models.Text import class_descriptor_5_only_face, class_descriptor_caer_only_face
 from models.Adapter import Adapter
+from models.CrossModalAttentionFusion import CrossModalAttentionFusion
 from clip import clip
 import copy
 import itertools
@@ -84,10 +85,13 @@ class GenerateModel(nn.Module):
         
         self.clip_model_ = clip_model
         
-        # Fusion: num_active_streams * 512 → 512
+        self.fusion_type = getattr(args, 'fusion_type', 'concat')
+        if self.fusion_type == 'cmaf' and 'face' in self.active_streams and 'body' in self.active_streams:
+            self.cmaf = CrossModalAttentionFusion(dim=512, num_heads=4, dropout=0.1)
+            
         fusion_dim = self.num_active_streams * 512
         self.project_fc = nn.Linear(fusion_dim, 512)
-        print(f"=> Fusion: {fusion_dim}D → 512D (project_fc)")
+        print(f"=> Fusion: {self.fusion_type} | {fusion_dim}D → 512D (project_fc)")
 
         # MoCo Initialization
         if hasattr(args, 'use_moco') and args.use_moco:
@@ -112,6 +116,10 @@ class GenerateModel(nn.Module):
                 self.temporal_net_context_m = copy.deepcopy(self.temporal_net_context)
                 for param in self.temporal_net_context_m.parameters(): param.requires_grad = False
 
+            if self.fusion_type == 'cmaf' and hasattr(self, 'cmaf'):
+                self.cmaf_m = copy.deepcopy(self.cmaf)
+                for param in self.cmaf_m.parameters(): param.requires_grad = False
+
             for param in self.image_encoder_m.parameters(): param.requires_grad = False
             for param in self.project_fc_m.parameters(): param.requires_grad = False
 
@@ -133,6 +141,9 @@ class GenerateModel(nn.Module):
                 param_k.data = param_k.data * self.moco_m + param_q.data * (1. - self.moco_m)
         if 'context' in self.active_streams:
             for param_q, param_k in zip(self.temporal_net_context.parameters(), self.temporal_net_context_m.parameters()):
+                param_k.data = param_k.data * self.moco_m + param_q.data * (1. - self.moco_m)
+        if self.fusion_type == 'cmaf' and hasattr(self, 'cmaf'):
+            for param_q, param_k in zip(self.cmaf.parameters(), self.cmaf_m.parameters()):
                 param_k.data = param_k.data * self.moco_m + param_q.data * (1. - self.moco_m)
         for param_q, param_k in zip(self.project_fc.parameters(), self.project_fc_m.parameters()):
             param_k.data = param_k.data * self.moco_m + param_q.data * (1. - self.moco_m)
@@ -172,7 +183,14 @@ class GenerateModel(nn.Module):
             features.append(self._encode_stream(
                 image_context, self.image_encoder_m, None, self.temporal_net_context_m, self.dtype))
         
-        video_features = torch.cat(features, dim=-1)
+        if self.fusion_type == 'cmaf' and hasattr(self, 'cmaf_m'):
+            feat_fb = self.cmaf_m(features[0], features[1])
+            if 'context' in self.active_streams:
+                video_features = torch.cat([feat_fb, features[2]], dim=-1)
+            else:
+                video_features = feat_fb
+        else:
+            video_features = torch.cat(features, dim=-1)
         video_features = self.project_fc_m(video_features)
         video_features = video_features / (video_features.norm(dim=-1, keepdim=True) + 1e-6)
         return video_features
@@ -208,8 +226,14 @@ class GenerateModel(nn.Module):
             features.append(self._encode_stream(
                 image_context, self.image_encoder, None, self.temporal_net_context, compute_dtype))
 
-        # Concat active streams → project to 512D
-        video_features = torch.cat(features, dim=-1)
+        if self.fusion_type == 'cmaf' and hasattr(self, 'cmaf'):
+            feat_fb = self.cmaf(features[0], features[1])
+            if 'context' in self.active_streams:
+                video_features = torch.cat([feat_fb, features[2]], dim=-1)
+            else:
+                video_features = feat_fb
+        else:
+            video_features = torch.cat(features, dim=-1)
         video_features = self.project_fc(video_features)
         video_features = video_features / (video_features.norm(dim=-1, keepdim=True) + 1e-6)
 

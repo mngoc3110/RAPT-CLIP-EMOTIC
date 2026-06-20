@@ -132,9 +132,8 @@ model_group.add_argument('--use-moco', action='store_true', help='Use MoCoRank f
 model_group.add_argument('--moco-k', type=int, default=4096, help='Queue size for MoCo.')
 model_group.add_argument('--moco-m', type=float, default=0.99, help='Momentum for MoCo.')
 model_group.add_argument('--moco-t', type=float, default=0.07, help='Temperature for MoCo.')
-model_group.add_argument('--streams', type=str, default='face,body,context',
-                         help='Comma-separated list of active visual streams. Options: face,body,context. '
-                              'E.g., "body,context" for 2-stream ablation without face.')
+model_group.add_argument('--streams', type=str, default='face,body,context', help='Comma-separated list of active streams (face,body,context)')
+model_group.add_argument('--fusion-type', type=str, default='concat', choices=['concat', 'cmaf'], help='Fusion type: concat or cmaf')
 
 # ==================== Helper Functions ====================
 def setup_environment(args: argparse.Namespace) -> argparse.Namespace:
