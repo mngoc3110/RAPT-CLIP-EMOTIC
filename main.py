@@ -2,9 +2,13 @@
 import argparse
 import datetime
 import os
+import sys
 import random
 import shutil
 import time
+
+# Add the project root directory to Python's sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Suppress OpenCV and FFmpeg warnings
 os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
